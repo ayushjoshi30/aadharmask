@@ -1,0 +1,63 @@
+# =========================================================
+# Base ignores — remove unnecessary files from the build
+# =========================================================
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# IDE / Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Git
+.git/
+.gitignore
+
+# Docker build helpers (optional, but keep Dockerfile!)
+docker-compose.yml
+docker-build.sh
+docker-build.bat
+docker-run.sh
+docker-run.bat
+
+# Docs and examples
+*.md
+
+# OS and temporary files
+.DS_Store
+Thumbs.db
+*.tmp
+*.temp
+
+# Logs
+*.log
+
+# Training artifacts (exclude only what you don't need)
+model/weights/last.pt
+# KEEP these (so don't exclude them)
+#!model/weights/best.pt
+#!model/weights/best.onnx
+
+# =========================================================
+# Only include essential files for building the app
+# =========================================================
+!Dockerfile
+!requirements.txt
+!main.py
+!aadhaar_processor.py
+!generate_token.py
+!model/weights/best.pt
+!model/weights/best.onnx
