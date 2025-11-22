@@ -5,7 +5,7 @@ In-memory processing - no files stored on disk
 With time-based HMAC authentication
 """
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, Header, Depends
+from fastapi import FastAPI, File, UploadFile, HTTPException, Header, Depends, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -225,6 +225,7 @@ async def login_and_get_token(credentials: LoginRequest):
 @app.post("/api/aadhaar/upload")
 async def upload_aadhaar(
     file: UploadFile = File(...),
+    include_all_rotations: bool = Form(False),
     authorized: bool = Depends(verify_authorization)
 ):
     """
@@ -235,6 +236,8 @@ async def upload_aadhaar(
     Requires: Authorization header with valid token
     """
     try:
+        request_start_time = time.time()
+        
         # Validate file type
         if not file.content_type.startswith('image/'):
             raise HTTPException(status_code=400, detail="File must be an image")
@@ -242,24 +245,30 @@ async def upload_aadhaar(
         # Generate unique job ID for tracking
         job_id = str(uuid.uuid4())
         
-        # Read file directly into memory
+        # 1. File Read
+        t0 = time.time()
         image_bytes = await file.read()
+        t1 = time.time()
+        file_read_ms = (t1 - t0) * 1000
         
-        # Convert bytes to numpy array for OpenCV
+        # 2. Image Decode
+        t2 = time.time()
         nparr = np.frombuffer(image_bytes, np.uint8)
         image_array = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        t3 = time.time()
+        image_decode_ms = (t3 - t2) * 1000
         
         if image_array is None:
             raise HTTPException(status_code=400, detail="Invalid image file")
         
         # Process the image (in memory)
         try:
-            result = process_single_image(image_array=image_array)
+            result = process_single_image(image_array=image_array, include_all_rotations=include_all_rotations)
             
             if result is None:
                 raise HTTPException(status_code=500, detail="Image processing failed")
             
-            extracted_info, masked_image_array = result
+            extracted_info, masked_image_array, processor_metrics = result
             
             # Check if masking was actually applied
             # Method 1: Check extracted info
@@ -275,8 +284,7 @@ async def upload_aadhaar(
             original_resized = cv2.resize(image_array, (masked_image_array.shape[1], masked_image_array.shape[0]))
             
             # Check for black pixels (0,0,0) that indicate masking was applied
-            # Masking uses (0,0,0) black color, so check if masked image has black pixels not in original
-            # OpenCV uses BGR format, so check for [0, 0, 0] in BGR
+            # Masking uses (0,0,0) black color, so check for [0, 0, 0] in BGR
             masked_black = np.all(masked_image_array == [0, 0, 0], axis=2)
             original_black = np.all(original_resized == [0, 0, 0], axis=2)
             
@@ -289,14 +297,29 @@ async def upload_aadhaar(
             
             # Convert masked image array to base64
             # Encode as JPEG
+            t4 = time.time()
             success, buffer = cv2.imencode('.jpg', masked_image_array)
             if not success:
                 raise HTTPException(status_code=500, detail="Failed to encode masked image")
             
             image_bytes = buffer.tobytes()
             base64_image = base64.b64encode(image_bytes).decode('utf-8')
+            t5 = time.time()
+            image_encode_ms = (t5 - t4) * 1000
             
             image_format = 'jpeg'
+            
+            # Calculate total request time
+            total_request_ms = (time.time() - request_start_time) * 1000
+            
+            # Compile final performance metrics
+            performance_metrics = {
+                "1_file_read_ms": file_read_ms,
+                "2_image_decode_ms": image_decode_ms,
+                **processor_metrics,
+                "4b_image_encode_ms": image_encode_ms,
+                "5_total_request_ms": total_request_ms
+            }
             
             # Prepare response with base64 image
             if masking_applied:
@@ -310,7 +333,8 @@ async def upload_aadhaar(
                     "image_format": image_format,
                     "data_uri": f"data:image/{image_format};base64,{base64_image}",
                     "processed_at": datetime.now().isoformat(),
-                    "note": "Image processed in memory - no files stored on disk"
+                    "note": "Image processed in memory - no files stored on disk",
+                    "performance": performance_metrics
                 }
                 return JSONResponse(content=response_data, status_code=200)
             else:
@@ -325,7 +349,8 @@ async def upload_aadhaar(
                     "data_uri": f"data:image/{image_format};base64,{base64_image}",
                     "processed_at": datetime.now().isoformat(),
                     "error": "Aadhaar card not detected or no masking applied",
-                    "note": "Image processed but no Aadhaar detected - original image returned"
+                    "note": "Image processed but no Aadhaar detected - original image returned",
+                    "performance": performance_metrics
                 }
                 return JSONResponse(content=response_data, status_code=422)  # 422 Unprocessable Entity
             

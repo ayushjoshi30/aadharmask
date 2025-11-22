@@ -8,7 +8,7 @@ YOLOv8 Aadhaar Masking (Full Auto Pipeline)
 Adapted for API usage
 """
 
-import os, cv2, re, json, numpy as np, pytesseract
+import os, cv2, re, json, numpy as np, pytesseract, time
 from ultralytics import YOLO
 
 CONFIDENCE_THRESHOLD = 0.5
@@ -129,10 +129,13 @@ def format_masked_aadhaar(aadhaar_text):
     return f"XXXX XXXX {digits[-4:]}" if len(digits) >= 12 else "XXXX XXXX XXXX"
 
 # ---------------- YOLO-BASED DETECTION ----------------
-def detect_aadhaar_yolo(image):
+def detect_aadhaar_yolo(image, include_all_rotations=False):
     """Try Aadhaar detection at 0° first; if not found, rotate."""
+    import time
+    start_time = time.time()
+    
     if model is None:
-        return None, None, None, None, image, None
+        return None, None, None, None, image, None, 0
     
     best_conf, best_angle, best_box, best_text = 0, 0, None, None
     best_image = image.copy()
@@ -145,10 +148,16 @@ def detect_aadhaar_yolo(image):
             conf = float(box.conf[0])
             text = extract_text_from_box(image, box.xyxy[0])
             if re.search(AADHAAR_REGEX, text.replace(" ", "")):
-                return conf, 0, box.xyxy[0], text, image, original_image  # Found, skip rotations
+                inference_time = (time.time() - start_time) * 1000
+                return conf, 0, box.xyxy[0], text, image, original_image, inference_time  # Found, skip rotations
     
     # Step 2: try rotations
-    for angle in range(ROTATION_STEP, 360, ROTATION_STEP):
+    if include_all_rotations:
+        rotation_angles = range(ROTATION_STEP, 360, ROTATION_STEP)
+    else:
+        rotation_angles = [90, 180, 270]
+
+    for angle in rotation_angles:
         rotated = rotate_image(image, angle)
         results = model(rotated, conf=CONF_THRESH, verbose=False)
         for result in results:
@@ -160,10 +169,11 @@ def detect_aadhaar_yolo(image):
         if best_conf > 0.85:  # confident early exit
             break
     
+    inference_time = (time.time() - start_time) * 1000
     if best_conf > 0:
-        return best_conf, best_angle, best_box, best_text, best_image, original_image
+        return best_conf, best_angle, best_box, best_text, best_image, original_image, inference_time
     else:
-        return None, None, None, None, image, original_image
+        return None, None, None, None, image, original_image, inference_time
 
 def try_multiple_orientations(image):
     """
@@ -301,11 +311,11 @@ def process_image_with_rotation(image_path, original_image):
     return extracted_info, image_with_boxes, detected_angle
 
 # ---------------- MAIN PROCESSOR ----------------
-def process_single_image(image_path=None, output_directory=None, job_id=None, image_array=None):
+def process_single_image(image_path=None, output_directory=None, job_id=None, image_array=None, include_all_rotations=False):
     """
     Main processing function with YOLO detection and fallback to orientation detection
     Can work with either file path or numpy array (in-memory processing)
-    Returns: (extracted_info, masked_image_array) or None on failure
+    Returns: (extracted_info, masked_image_array, metrics) or None on failure
     """
     global _model_usage_count
     
@@ -331,16 +341,24 @@ def process_single_image(image_path=None, output_directory=None, job_id=None, im
         return None
     
     # Try YOLO-based detection with rotation
-    conf, angle, box, aadhaar_text, best_image, original_image = detect_aadhaar_yolo(image)
+    # Measure preprocessing (negligible here as we just pass image, but keeping placeholder)
+    t0 = time.time()
+    # Preprocessing logic if any
+    t1 = time.time()
+    preprocessing_ms = (t1 - t0) * 1000
+
+    conf, angle, box, aadhaar_text, best_image, original_image, inference_ms = detect_aadhaar_yolo(image, include_all_rotations=include_all_rotations)
+    
+    t2 = time.time()
     
     if aadhaar_text:  # YOLO found Aadhaar
         # Mask the Aadhaar in the rotated image
         masked_image = mask_aadhaar_area(best_image, box)
         
         # Rotate the masked image back to original orientation
-        if angle != 0:
-            print(f"🔄 Rotating masked image back to original orientation (from {angle}° to 0°)")
-            masked_image = rotate_image_back(masked_image, angle)
+        # if angle != 0:
+        #     print(f"🔄 Rotating masked image back to original orientation (from {angle}° to 0°)")
+            # masked_image = rotate_image_back(masked_image, angle)
         
         masked_display = format_masked_aadhaar(aadhaar_text)
         print(f"✅ Aadhaar Detected @ {angle}° | Conf: {conf:.2f}")
@@ -348,7 +366,18 @@ def process_single_image(image_path=None, output_directory=None, job_id=None, im
         print(f"✅ Image returned in original orientation (in memory)")
         
         extracted_info = {"AADHAR_NUMBER": masked_display}
-        return extracted_info, masked_image
+        
+        t3 = time.time()
+        postproc_ms = (t3 - t2) * 1000
+        
+        metrics = {
+            "3a_preprocessing_ms": preprocessing_ms,
+            "3b_model_forward_ms": inference_ms,
+            "3_model_inference_total_ms": inference_ms, # In this case same as forward, but could include overhead
+            "4a_postproc_validation_ms": postproc_ms
+        }
+        
+        return extracted_info, masked_image, metrics
     
     # Fallback — use orientation detection if YOLO fails
     else:
@@ -375,11 +404,22 @@ def process_single_image(image_path=None, output_directory=None, job_id=None, im
         
         if extracted_info is not None and masked_image is not None:
             # Rotate back to original orientation
-            if detected_angle != 0:
-                print(f"🔄 Rotating processed image back to original orientation (from {detected_angle}° to 0°)")
-                masked_image = rotate_image_back(masked_image, detected_angle)
+            # if detected_angle != 0:
+            #     print(f"🔄 Rotating processed image back to original orientation (from {detected_angle}° to 0°)")
+                # masked_image = rotate_image_back(masked_image, detected_angle)
             
             aadhaar_text = extracted_info.get("AADHAR_NUMBER", None)
+            
+            t3 = time.time()
+            postproc_ms = (t3 - t2) * 1000
+            
+            metrics = {
+                "3a_preprocessing_ms": preprocessing_ms,
+                "3b_model_forward_ms": inference_ms, # YOLO failed, so this is the time it took to fail
+                "3_model_inference_total_ms": inference_ms,
+                "4a_postproc_validation_ms": postproc_ms # Includes fallback time
+            }
+
             if aadhaar_text:
                 masked_display = format_masked_aadhaar(aadhaar_text)
                 print(f"✅ Aadhaar Detected from fallback")
@@ -387,14 +427,14 @@ def process_single_image(image_path=None, output_directory=None, job_id=None, im
                 print(f"✅ Image returned in original orientation (in memory)")
                 
                 extracted_info["AADHAR_NUMBER"] = masked_display
-                return extracted_info, masked_image
+                return extracted_info, masked_image, metrics
             else:
                 # No Aadhaar found but still return the processed image in original orientation
                 print("⚠️ No Aadhaar number detected, but returning processed image")
                 print(f"✅ Image returned in original orientation (in memory)")
                 
                 extracted_info["AADHAR_NUMBER"] = "Not detected"
-                return extracted_info, masked_image
+                return extracted_info, masked_image, metrics
         
         # Last resort: return original image if everything fails
         print("⚠️ No Aadhaar detected even after fallback, returning original image")
@@ -408,5 +448,16 @@ def process_single_image(image_path=None, output_directory=None, job_id=None, im
             "DATE_OF_BIRTH": None,
             "GENDER": None
         }
-        return extracted_info, resized_original
+        
+        t3 = time.time()
+        postproc_ms = (t3 - t2) * 1000
+        
+        metrics = {
+            "3a_preprocessing_ms": preprocessing_ms,
+            "3b_model_forward_ms": inference_ms,
+            "3_model_inference_total_ms": inference_ms,
+            "4a_postproc_validation_ms": postproc_ms
+        }
+        
+        return extracted_info, resized_original, metrics
 
