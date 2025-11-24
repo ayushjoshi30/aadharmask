@@ -1,393 +1,325 @@
-# Graviton Backend API - Aadhaar Masking Service
+# Aadhaar Masking API
 
-A FastAPI-based backend service for automatic Aadhaar card masking using YOLOv8 object detection and OCR.
+Professional-grade FastAPI service for automated Aadhaar card detection and privacy-preserving masking using YOLOv8.
 
 ## Features
 
-✅ **Auto-rotation detection** - Handles Aadhaar cards at any angle (0°-345°, every 15°)  
-✅ **Regex-based Aadhaar detection** - Validates Aadhaar numbers even if YOLO labels are incorrect  
-✅ **Intelligent fallback** - Uses orientation detection if primary YOLO detection fails  
-✅ **Smart masking** - Masks 65% of Aadhaar number (keeps last 4 digits visible)  
-✅ **In-memory processing** - No files stored on disk, all processing done in RAM  
-✅ **Base64 response** - Instant image return as base64 encoded string  
-✅ **Secure authentication** - Time-based HMAC-SHA256 token authentication  
-✅ **Network accessible** - Access from any device on your WiFi network  
-✅ **RESTful API** - Clean API endpoints with automatic documentation  
+- 🔒 **Secure Authentication** - HMAC-SHA256 token-based auth + session management
+- 🎯 **Auto-Detection** - YOLOv8-powered Aadhaar card detection
+- 🔐 **Privacy-First** - Only stores failed requests for debugging
+- 📊 **Admin Dashboard** - Professional web UI for request monitoring
+- 📥 **Excel Export** - Download audit logs as spreadsheets
+- 💾 **Persistent Logging** - 7-day automatic cleanup
+- 🐳 **Docker Ready** - Production-ready containerization
+- ⚡ **In-Memory Processing** - No files stored on disk
 
-## Prerequisites
+## Quick Start
 
-- Python 3.8 or higher
-- Tesseract OCR installed on your system
-- YOLO model weights (see Model Setup below)
+### Using Docker (Recommended)
 
-### Installing Tesseract OCR
-
-**Windows:**
 ```bash
-# Download and install from: https://github.com/UB-Mannheim/tesseract/wiki
-# Add Tesseract to your PATH
+# Build image
+docker build -t aadhaar-api .
+
+# Run container
+docker run -d -p 8000:8000 \
+  -e SECRET_KEY="your-secret-key" \
+  -e ADMIN_USERNAME="admin" \
+  -e ADMIN_PASSWORD="your-password" \
+  --name aadhaar-api \
+  aadhaar-api
 ```
 
-**Linux:**
+### Manual Setup
+
 ```bash
-sudo apt-get update
-sudo apt-get install tesseract-ocr
-```
-
-**macOS:**
-```bash
-brew install tesseract
-```
-
-## Installation
-
-1. **Clone or navigate to the project directory:**
-```bash
-cd aadharmaskapp
-```
-
-2. **Create a virtual environment (recommended):**
-```bash
-python -m venv venv
-
-# Activate on Windows:
-venv\Scripts\activate
-
-# Activate on Linux/macOS:
-source venv/bin/activate
-```
-
-3. **Install dependencies:**
-```bash
+# Install dependencies
 pip install -r requirements.txt
-```
 
-## Model Setup
-
-Ensure your YOLO model is available at one of these paths:
-- `model/weights/best.pt` (default)
-- `runs/detect/aadhar_model/weights/best.pt`
-- `aadhar_model.pt`
-- `../model/weights/best.pt`
-- `../aadhar_model.pt`
-
-The application will automatically search for the model in these locations.
-
-## Running the Server
-
-1. **Start the FastAPI server:**
-```bash
+# Run server
 python main.py
 ```
 
-2. **Access the API:**
-   - **Local Access:** http://localhost:8000
-   - **Network Access:** http://YOUR_LOCAL_IP:8000 (displayed in console)
-   - **Interactive API Docs:** http://localhost:8000/docs
-   - **Alternative API Docs:** http://localhost:8000/redoc
+Server runs on `http://localhost:8000`
 
-## 🔐 Authentication
+## Authentication System
 
-The API uses **username/password + time-based HMAC-SHA256** authentication for security.
+### API Authentication (HMAC-SHA256)
 
-### Quick Start
+For programmatic access to `/api/aadhaar/upload`:
 
-**Step 1: Login with Credentials**
+**1. Get Token:**
 ```bash
 curl -X POST http://localhost:8000/api/auth/token \
   -H "Content-Type: application/json" \
-  -d '{"username":"admin","password":"gravitonadmin"}'
+  -d '{"username": "admin", "password": "gravitonadmin"}'
 ```
 
 **Response:**
 ```json
 {
   "success": true,
-  "token": "MTczMTQxMjgwMHw4YTJiNGM2...",
-  "expires_at": "2025-11-12T11:35:00"
-}
-```
-
-**Step 2: Use Token to Upload**
-```bash
-curl -X POST http://localhost:8000/api/aadhaar/upload \
-  -H "Authorization: Bearer YOUR_TOKEN_HERE" \
-  -F "file=@aadhaar.jpg"
-```
-
-### Credentials
-- **Username:** `admin`
-- **Password:** `gravitonadmin`
-
-### Token Details
-- **Validity:** 5 minutes
-- **Algorithm:** HMAC-SHA256
-- **Format:** `Authorization: Bearer <token>`
-
-📖 **Full Login Guide:** See [LOGIN_GUIDE.md](LOGIN_GUIDE.md)
-
----
-
-## API Endpoints
-
-### 1. Login & Get Auth Token
-```
-POST /api/auth/token
-```
-Login with username/password to get authentication token.
-
-**Request Body:**
-```json
-{
-  "username": "admin",
-  "password": "gravitonadmin"
-}
-```
-
-**Response:**
-```json
-{
-  "success": true,
-  "message": "Authentication successful",
-  "token": "MTczMTQxMjgwMHw4YTJiNGM2...",
-  "expires_at": "2025-11-12T11:35:00",
+  "token": "base64_encoded_token",
   "validity_minutes": 5
 }
 ```
 
-### 2. Upload Aadhaar Image
+**2. Use Token:**
+```bash
+curl -X POST http://localhost:8000/api/aadhaar/upload \
+  -H "Authorization: Bearer <token>" \
+  -F "file=@aadhaar.jpg"
 ```
-POST /api/aadhaar/upload
-```
-Upload an Aadhaar card image for processing and masking. Returns masked image as base64.
 
-**Authentication:** Required
+**Token Details:**
+- Format: `timestamp|hmac_signature` (base64 encoded)
+- Validity: 5 minutes
+- Algorithm: HMAC-SHA256
+- Secure: Constant-time comparison to prevent timing attacks
+
+### Admin Authentication (Session-Based)
+
+For web dashboard access at `/admin/login`:
+
+1. Navigate to `http://localhost:8000/admin/login`
+2. Enter credentials (default: `admin` / `gravitonadmin`)
+3. Secure cookie created with 1-hour validity
+4. Access admin panel at `/admin/logs`
+
+**Session Features:**
+- HttpOnly cookies (XSS protection)
+- SameSite protection (CSRF prevention)
+- Automatic expiry after 1 hour
+- Logout endpoint: `/admin/logout`
+
+## API Endpoints
+
+### Public Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/` | GET | API information |
+| `/health` | GET | Health check |
+| `/api/auth/token` | POST | Get authentication token |
+
+### Protected Endpoints (Requirestoken)
+
+| Endpoint | Method | Description | Auth Type |
+|----------|--------|-------------|-----------|
+| `/api/aadhaar/upload` | POST | Upload & process image | Bearer Token |
+| `/admin/login` | GET/POST | Admin login page/process | None (public) |
+| `/admin/logs` | GET | View request logs | Session Cookie |
+| `/admin/logs/download` | GET | Download logs as Excel | Session Cookie |
+| `/admin/logout` | GET | Logout from admin | Session Cookie |
+
+### Upload Endpoint Details
 
 **Request:**
-- Headers: `Authorization: Bearer <token>`
-- Content-Type: `multipart/form-data`
-- Body: `file` (image file)
+```bash
+POST /api/aadhaar/upload
+Content-Type: multipart/form-data
+Authorization: Bearer <token>
 
-**Response:**
+Form Data:
+  file: <image_file>
+  include_all_rotations: false (optional)
+```
+
+**Response (Success - 200):**
 ```json
 {
-  "job_id": "uuid-string",
-  "status": "completed",
-  "original_filename": "aadhaar.jpg",
-  "extracted_info": {
-    "AADHAR_NUMBER": "XXXX XXXX 1234"
-  },
-  "masked_image_base64": "/9j/4AAQSkZJRgABAQEAYABgAAD...",
-  "image_format": "jpeg",
-  "data_uri": "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEAYABgAAD...",
-  "processed_at": "2025-11-12T10:30:00",
-  "note": "Image processed in memory - no files stored on disk"
+  "masked_output": "base64_encoded_masked_image",
+  "details": {
+    "already_masked_count": 0,
+    "masking_done_count": 1
+  }
 }
 ```
 
-**📸 Image Response Formats:**
-- `masked_image_base64`: Raw base64-encoded image string (decode to save)
-- `image_format`: Image format (always jpeg)
-- `data_uri`: Ready-to-use data URI for HTML `<img>` tags (recommended!)
-
-### 2. Health Check
-```
-GET /health
-```
-Check if the server is running and healthy.
-
-## Directory Structure
-
-```
-aadharmaskapp/
-├── main.py                          # FastAPI application (in-memory processing)
-├── aadhaar_processor.py             # YOLO + OCR processing logic
-├── requirements.txt                 # Python dependencies
-├── README.md                        # Documentation
-├── POSTMAN_GUIDE.md                # Postman testing guide
-└── model/           # YOLO model directory
-    └── aadhar_model/
-        └── weights/
-            └── best.pt              # YOLO model weights
-
-Note: No uploads/ or outputs/ directories - all processing done in memory!
+**Response (No Detection - 422):**
+```json
+{
+  "masked_output": "base64_encoded_original_image",
+  "details": {
+    "already_masked_count": 0,
+    "masking_done_count": 0
+  }
+}
 ```
 
-## Usage Example with cURL
+## Admin Logging System
+
+### Storage Strategy
+
+**Success (200):**
+- ✅ Masking applied successfully
+- ❌ No images stored (privacy/storage optimization)
+- ✅ Only status + response logged
+
+**Failed (422):**
+- ❌ No Aadhaar detected
+- ✅ Input image stored for debugging
+- ✅ Full request details logged
+
+### Log Structure
+
+```json
+{
+  "timestamp": "2025-11-24T15:00:00.123456",
+  "status_code": 422,
+  "input_base64": "...", // Only for failed requests
+  "response_body": {
+    "masked_output": "...",
+    "details": {
+      "already_masked_count": 0,
+      "masking_done_count": 0
+    }
+  }
+}
+```
+
+### Auto-Cleanup
+
+- **Retention:** 7 days
+- **Cleanup runs:** On startup + after each request
+- **Max logs:** 1000 entries
+- **Storage:** `request_logs.json` file
+- **Persistence:** Survives server restarts
+
+### Configuration
+
+```python
+# In main.py
+LOG_RETENTION_DAYS = 7     # Change retention period
+MAX_LOGS = 1000             # Change max log count
+```
+
+## Admin Dashboard
+
+Access at `http://localhost:8000/admin/login`
+
+**Features:**
+- 📊 Statistics cards (Total, Success, Failed)
+- 📋 Request log table
+- 🖼️ Image preview (click to enlarge) - failed requests only
+- 📥 Excel export button
+- 🎨 Minimalist professional UI
+- 🔐 Session-based authentication
+
+## Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SECRET_KEY` | `GRAVITON_AADHAAR_SECURE_2024` | HMAC signing key |
+| `ADMIN_USERNAME` | `admin` | Admin username |
+| `ADMIN_PASSWORD` | `gravitonadmin` | Admin password |
+
+**⚠️ Change defaults in production!**
+
+## Docker Deployment
+
+### Build & Run
 
 ```bash
-# Upload an Aadhaar image and get base64 response
-curl -X POST "http://localhost:8000/api/aadhaar/upload" \
-  -H "accept: application/json" \
-  -H "Content-Type: multipart/form-data" \
-  -F "file=@/path/to/aadhaar.jpg"
-
-# Response will contain base64 encoded image in 'masked_image_base64' field
-# Use the 'data_uri' field to display directly in HTML
+docker build -t aadhaar-api .
+docker run -d -p 8000:8000 \
+  -v $(pwd)/request_logs.json:/app/request_logs.json \
+  -e SECRET_KEY="production-secret-key" \
+  -e ADMIN_USERNAME="admin" \
+  -e ADMIN_PASSWORD="secure-password" \
+  aadhaar-api
 ```
 
-## Usage Example with Python
+### Volume Mount (Optional)
 
-### Example 1: Save Base64 to File (with Authentication)
-```python
-import requests
-import base64
-
-# Step 1: Login to get authentication token
-login_url = "http://localhost:8000/api/auth/token"
-credentials = {
-    "username": "admin",
-    "password": "gravitonadmin"
-}
-
-token_response = requests.post(login_url, json=credentials)
-token = token_response.json()["token"]
-
-print(f"✅ Login successful!")
-print(f"Token expires at: {token_response.json()['expires_at']}")
-
-# Step 2: Upload image with authentication
-url = "http://localhost:8000/api/aadhaar/upload"
-headers = {"Authorization": f"Bearer {token}"}
-
-with open("aadhaar.jpg", "rb") as f:
-    files = {"file": f}
-    response = requests.post(url, headers=headers, files=files)
-
-data = response.json()
-
-print(f"Job ID: {data['job_id']}")
-print(f"Masked Aadhaar: {data['extracted_info']['AADHAR_NUMBER']}")
-print(f"Image Format: {data['image_format']}")
-
-# Decode base64 and save image
-base64_string = data["masked_image_base64"]
-image_bytes = base64.b64decode(base64_string)
-
-with open("masked_aadhaar.jpg", "wb") as f:
-    f.write(image_bytes)
-
-print("✅ Image saved successfully!")
+Mount `request_logs.json` to persist logs:
+```bash
+-v /path/to/logs:/app/request_logs.json
 ```
 
-### Example 2: Display in HTML
-```python
-import requests
+### Health Check
 
-# Login to get token
-credentials = {"username": "admin", "password": "gravitonadmin"}
-token = requests.post("http://localhost:8000/api/auth/token", json=credentials).json()["token"]
-
-# Upload image with authentication
-response = requests.post(
-    "http://localhost:8000/api/aadhaar/upload",
-    headers={"Authorization": f"Bearer {token}"},
-    files={"file": open("aadhaar.jpg", "rb")}
-)
-data = response.json()
-
-# Generate HTML with embedded image (no separate download needed!)
-html = f"""
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Masked Aadhaar</title>
-    <style>
-        body {{ font-family: Arial; text-align: center; padding: 50px; }}
-        img {{ max-width: 600px; border: 2px solid #667eea; border-radius: 10px; }}
-    </style>
-</head>
-<body>
-    <h1>🔐 Masked Aadhaar Card</h1>
-    <img src="{data['data_uri']}" alt="Masked Aadhaar">
-    <p><strong>Aadhaar Number:</strong> {data['extracted_info']['AADHAR_NUMBER']}</p>
-    <p><em>Processed at: {data['processed_at']}</em></p>
-</body>
-</html>
-"""
-
-with open("result.html", "w") as f:
-    f.write(html)
-
-print("✅ HTML file created! Open result.html in your browser.")
+```bash
+curl http://localhost:8000/health
 ```
 
-### Example 3: Use with OpenCV/NumPy
-```python
-import requests
-import base64
-import numpy as np
-import cv2
+## Project Structure
 
-# Login to get token
-credentials = {"username": "admin", "password": "gravitonadmin"}
-token = requests.post("http://localhost:8000/api/auth/token", json=credentials).json()["token"]
-
-# Upload and get response
-response = requests.post(
-    "http://localhost:8000/api/aadhaar/upload",
-    headers={"Authorization": f"Bearer {token}"},
-    files={"file": open("aadhaar.jpg", "rb")}
-)
-data = response.json()
-
-# Decode base64 to numpy array
-base64_string = data["masked_image_base64"]
-image_bytes = base64.b64decode(base64_string)
-nparr = np.frombuffer(image_bytes, np.uint8)
-image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-
-# Now you can process it further with OpenCV
-cv2.imshow("Masked Aadhaar", image)
-cv2.waitKey(0)
-cv2.destroyAllWindows()
+```
+aadharmask/
+├── main.py                   # FastAPI application
+├── aadhaar_processor.py      # YOLO processing logic
+├── requirements.txt          # Python dependencies
+├── Dockerfile               # Container definition
+├── .dockerignore            # Docker build exclusions
+├── request_logs.json        # Persistent log storage (auto-created)
+└── model/
+    └── weights/
+        └── best.pt          # YOLOv8 model
 ```
 
-## Network Access
+## Security Best Practices
 
-The server is configured to accept connections from any device on your local network:
+1. **Change default credentials** immediately
+2. **Use strong SECRET_KEY** in production
+3. **Enable HTTPS** (reverse proxy recommended)
+4. **Restrict admin access** (IP whitelist/VPN)
+5. **Monitor logs** regularly
+6. **Rotate credentials** periodically
+7. **Use environment variables** (never hardcode)
 
-1. Find your local IP address (displayed when server starts)
-2. Connect from mobile/other devices: `http://YOUR_LOCAL_IP:8000`
-3. **Windows Firewall:** Ensure port 8000 is allowed
+## Technology Stack
+
+- **Framework:** FastAPI 0.109.0
+- **Server:** Uvicorn
+- **ML Model:** YOLOv8 (Ultralytics)
+- **OCR:** Tesseract via pytesseract
+- **Image Processing:** OpenCV, Pillow
+- **Excel Export:** openpyxl
+- **Authentication:** HMAC-SHA256, sessions
+
+## API Performance
+
+- **Model Loading:** Once on startup (reused)
+- **Processing:** In-memory (no disk I/O)
+- **Response:** Base64 encoded images
+- **Rotation:** Smart detection (0°, 90°, 180°, 270°)
 
 ## Troubleshooting
 
-### YOLO Model Not Found
+### Model Not Found
 ```
-❌ YOLO model not found in expected locations.
+ERROR: YOLO model not found
 ```
-**Solution:** Ensure `best.pt` is in one of the expected paths (see Model Setup)
+**Solution:** Ensure `model/weights/best.pt` exists
 
-### Tesseract Not Found
+### Tesseract Error
 ```
-TesseractNotFoundError
+ERROR: pytesseract not installed
 ```
-**Solution:** Install Tesseract OCR and add it to your system PATH
+**Solution:** `apt-get install tesseract-ocr` (Linux) or `brew install tesseract` (Mac)
 
-### Port Already in Use
+### Permission Denied (Logs)
 ```
-OSError: [Errno 98] Address already in use
+ERROR: Could not save logs
 ```
-**Solution:** Change port in `main.py` or kill the process using port 8000
+**Solution:** Check write permissions for `request_logs.json`
 
-### Image Processing Fails
-- Ensure image is a valid Aadhaar card
-- Check image quality and resolution
-- Verify Tesseract OCR is installed correctly
-
-## Development
-
-To run the server in development mode with auto-reload:
-```bash
-uvicorn main:app --reload --host 0.0.0.0 --port 8000
+### Docker Build Fails
 ```
+ERROR: COPY failed
+```
+**Solution:** Check `.dockerignore` - ensure required files not excluded
 
 ## License
 
-This project is for educational and development purposes.
+Proprietary - Internal Use Only
 
 ## Support
 
-For issues or questions, please check the logs in the console for detailed error messages.
+For issues or questions, contact your system administrator.
 
+---
+
+**Version:** 2.0.0  
+**Last Updated:** 2025-11-24

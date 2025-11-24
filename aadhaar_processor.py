@@ -11,7 +11,7 @@ Adapted for API usage
 import os, cv2, re, json, numpy as np, pytesseract, time
 from ultralytics import YOLO
 
-CONFIDENCE_THRESHOLD = 0.5
+CONFIDENCE_THRESHOLD = 0.6
 IMAGE_SIZE = 640
 
 def reset_extracted_info():
@@ -29,7 +29,7 @@ def clean_text(text, is_date=False):
     return re.sub(r'[^\w\s]', ' ', text).strip()
 
 # ---------------- CONFIG ----------------
-CONF_THRESH = 0.4
+CONF_THRESH = 0.6
 ROTATION_STEP = 15
 MASK_RATIO = 0.65
 AADHAAR_REGEX = re.compile(r"\d{4}\s?\d{4}\s?\d{4}")
@@ -131,7 +131,6 @@ def format_masked_aadhaar(aadhaar_text):
 # ---------------- YOLO-BASED DETECTION ----------------
 def detect_aadhaar_yolo(image, include_all_rotations=False):
     """Try Aadhaar detection at 0° first; if not found, rotate."""
-    import time
     start_time = time.time()
     
     if model is None:
@@ -311,7 +310,7 @@ def process_image_with_rotation(image_path, original_image):
     return extracted_info, image_with_boxes, detected_angle
 
 # ---------------- MAIN PROCESSOR ----------------
-def process_single_image(image_path=None, output_directory=None, job_id=None, image_array=None, include_all_rotations=False):
+def process_single_image(image_path=None, image_array=None, include_all_rotations=False):
     """
     Main processing function with YOLO detection and fallback to orientation detection
     Can work with either file path or numpy array (in-memory processing)
@@ -355,17 +354,16 @@ def process_single_image(image_path=None, output_directory=None, job_id=None, im
         # Mask the Aadhaar in the rotated image
         masked_image = mask_aadhaar_area(best_image, box)
         
-        # Rotate the masked image back to original orientation
-        # if angle != 0:
-        #     print(f"🔄 Rotating masked image back to original orientation (from {angle}° to 0°)")
-            # masked_image = rotate_image_back(masked_image, angle)
-        
         masked_display = format_masked_aadhaar(aadhaar_text)
         print(f"✅ Aadhaar Detected @ {angle}° | Conf: {conf:.2f}")
         print(f"🪪 Aadhaar (masked view): {masked_display}")
         print(f"✅ Image returned in original orientation (in memory)")
         
-        extracted_info = {"AADHAR_NUMBER": masked_display}
+        extracted_info = {
+            "AADHAR_NUMBER": masked_display,
+            "confidence": float(conf),
+            "rotation_angle": int(angle)
+        }
         
         t3 = time.time()
         postproc_ms = (t3 - t2) * 1000
@@ -403,11 +401,6 @@ def process_single_image(image_path=None, output_directory=None, job_id=None, im
             extracted_info, masked_image, detected_angle = process_image_with_rotation(image_path, original_image)
         
         if extracted_info is not None and masked_image is not None:
-            # Rotate back to original orientation
-            # if detected_angle != 0:
-            #     print(f"🔄 Rotating processed image back to original orientation (from {detected_angle}° to 0°)")
-                # masked_image = rotate_image_back(masked_image, detected_angle)
-            
             aadhaar_text = extracted_info.get("AADHAR_NUMBER", None)
             
             t3 = time.time()

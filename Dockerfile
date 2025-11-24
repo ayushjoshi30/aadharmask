@@ -35,7 +35,6 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # Copy application code
 COPY main.py .
 COPY aadhaar_processor.py .
-COPY generate_token.py .
 
 # Copy YOLO model (only the necessary file)
 COPY model/weights/best.pt /app/model/weights/best.pt
