@@ -236,7 +236,8 @@ async def login_and_get_token(credentials: LoginRequest):
 async def upload_aadhaar(
     file: UploadFile = File(...),
     include_all_rotations: bool = Form(False),
-    authorized: bool = Depends(verify_authorization)
+    authorized: bool = Depends(verify_authorization),
+    request_id: str = Header(None, alias="Request-ID")
 ):
     """Upload an Aadhaar card image for masking"""
     try:
@@ -260,7 +261,10 @@ async def upload_aadhaar(
         if result is None:
             raise HTTPException(status_code=500, detail="Image processing failed")
         
-        extracted_info, masked_image_array, _ = result
+        extracted_info, masked_image_array, metrics = result
+        
+        # Extract confidence from extracted_info
+        confidence = extracted_info.get("confidence", 0.0)
         
         # Check if masking was applied
         aadhaar_number = extracted_info.get("AADHAR_NUMBER", "")
@@ -309,8 +313,11 @@ async def upload_aadhaar(
         # Log the request - only store images for failed masking
         log_entry = {
             "timestamp": datetime.now().isoformat(),
+            "request_id": request_id if request_id else "N/A",
             "status_code": status_code,
-            "response_body": response_data
+            "response_body": response_data,
+            "confidence": confidence,
+            "performance": metrics
         }
         
         # Only store input image if masking failed (status 422)
@@ -545,7 +552,8 @@ async def download_logs_excel(request: Request, username: str = Depends(verify_a
     ws.title = "Request Logs"
     
     # Define headers
-    headers = ["Timestamp", "Status Code", "Masking Done", "Already Masked"]
+    headers = ["Timestamp", "Request ID", "Status Code", "Masking Done", "Already Masked", "Confidence", 
+               "Preprocessing (ms)", "Model Inference (ms)", "Postprocessing (ms)"]
     
     # Add input image column only if there are failed requests
     has_failed_requests = any(log['status_code'] == 422 for log in request_logs)
@@ -567,12 +575,25 @@ async def download_logs_excel(request: Request, username: str = Depends(verify_a
     for log in request_logs:
         masking_done = log['response_body']['details']['masking_done_count']
         already_masked = log['response_body']['details']['already_masked_count']
+        confidence = log.get('confidence', 0.0)
+        request_id = log.get('request_id', 'N/A')
+        
+        # Extract performance metrics
+        perf = log.get('performance', {})
+        preprocessing_ms = perf.get('3a_preprocessing_ms', 0.0)
+        inference_ms = perf.get('3_model_inference_total_ms', 0.0)
+        postprocessing_ms = perf.get('4a_postproc_validation_ms', 0.0)
         
         row = [
             log['timestamp'],
+            request_id,
             log['status_code'],
             masking_done,
-            already_masked
+            already_masked,
+            round(confidence, 4),
+            round(preprocessing_ms, 2),
+            round(inference_ms, 2),
+            round(postprocessing_ms, 2)
         ]
         
         # Add input image only if present (failed requests)
@@ -584,11 +605,16 @@ async def download_logs_excel(request: Request, username: str = Depends(verify_a
     
     # Adjust column widths
     ws.column_dimensions['A'].width = 25
-    ws.column_dimensions['B'].width = 12
-    ws.column_dimensions['C'].width = 15
+    ws.column_dimensions['B'].width = 20
+    ws.column_dimensions['C'].width = 12
     ws.column_dimensions['D'].width = 15
+    ws.column_dimensions['E'].width = 15
+    ws.column_dimensions['F'].width = 12
+    ws.column_dimensions['G'].width = 18
+    ws.column_dimensions['H'].width = 20
+    ws.column_dimensions['I'].width = 20
     if has_failed_requests:
-        ws.column_dimensions['E'].width = 30
+        ws.column_dimensions['J'].width = 30
     
     # Save to BytesIO
     excel_file = BytesIO()
@@ -839,8 +865,13 @@ async def admin_logs(request: Request, username: str = Depends(verify_admin_sess
                 <thead>
                     <tr>
                         <th>Timestamp</th>
+                        <th>Request ID</th>
                         <th>Status Code</th>
                         <th>Masking Status</th>
+                        <th>Confidence</th>
+                        <th>Preprocessing (ms)</th>
+                        <th>Inference (ms)</th>
+                        <th>Postproc (ms)</th>
                         <th>Input Image</th>
                     </tr>
                 </thead>
@@ -850,6 +881,14 @@ async def admin_logs(request: Request, username: str = Depends(verify_admin_sess
         for log in reversed(request_logs):
             status_class = f"status-{log['status_code']}"
             masking_done = log['response_body']['details']['masking_done_count']
+            confidence = log.get('confidence', 0.0)
+            request_id = log.get('request_id', 'N/A')
+            
+            # Extract performance metrics
+            perf = log.get('performance', {})
+            preprocessing_ms = perf.get('3a_preprocessing_ms', 0.0)
+            inference_ms = perf.get('3_model_inference_total_ms', 0.0)
+            postprocessing_ms = perf.get('4a_postproc_validation_ms', 0.0)
             
             # Only show input image if masking failed
             input_image_cell = ""
@@ -866,12 +905,17 @@ async def admin_logs(request: Request, username: str = Depends(verify_admin_sess
             html_content += f"""
                 <tr>
                     <td>{log['timestamp']}</td>
+                    <td>{request_id}</td>
                     <td class="{status_class}">{log['status_code']}</td>
                     <td>
                         <span class="badge {'badge-success' if masking_done == 1 else 'badge-warning'}">
                             {'Success' if masking_done == 1 else 'Failed'}
                         </span>
                     </td>
+                    <td>{round(confidence, 4)}</td>
+                    <td>{round(preprocessing_ms, 2)}</td>
+                    <td>{round(inference_ms, 2)}</td>
+                    <td>{round(postprocessing_ms, 2)}</td>
                     <td>{input_image_cell}</td>
                 </tr>
             """
