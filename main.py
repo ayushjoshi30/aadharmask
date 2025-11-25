@@ -235,7 +235,7 @@ async def login_and_get_token(credentials: LoginRequest):
 @app.post("/api/aadhaar/upload")
 async def upload_aadhaar(
     file: UploadFile = File(...),
-    include_all_rotations: bool = Form(False),
+    include_all_rotations: bool = Form(True),
     authorized: bool = Depends(verify_authorization),
     request_id: str = Header(None, alias="Request-ID")
 ):

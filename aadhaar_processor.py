@@ -129,8 +129,12 @@ def format_masked_aadhaar(aadhaar_text):
     return f"XXXX XXXX {digits[-4:]}" if len(digits) >= 12 else "XXXX XXXX XXXX"
 
 # ---------------- YOLO-BASED DETECTION ----------------
-def detect_aadhaar_yolo(image, include_all_rotations=False):
-    """Try Aadhaar detection at 0° first; if not found, rotate."""
+def detect_aadhaar_yolo(image, include_all_rotations=True):
+    """
+    Two-stage Aadhaar detection with rotation optimization:
+    Stage 1: Check 4 major angles (0, 90, 180, 270) - fast check
+    Stage 2: If Stage 1 fails, check remaining 19 angles (15, 30, 45, ... excluding already checked angles)
+    """
     start_time = time.time()
     
     if model is None:
@@ -140,38 +144,56 @@ def detect_aadhaar_yolo(image, include_all_rotations=False):
     best_image = image.copy()
     original_image = image.copy()
     
-    # Step 1: 0° check
-    results = model(image, conf=CONF_THRESH, verbose=False)
-    for result in results:
-        for box in result.boxes:
-            conf = float(box.conf[0])
-            text = extract_text_from_box(image, box.xyxy[0])
-            if re.search(AADHAAR_REGEX, text.replace(" ", "")):
-                inference_time = (time.time() - start_time) * 1000
-                return conf, 0, box.xyxy[0], text, image, original_image, inference_time  # Found, skip rotations
+    # Stage 1: Check 4 major angles (0, 90, 180, 270) - "without rotation" check
+    major_angles = [0, 90, 180, 270]
+    print(f"🔍 Stage 1: Checking {len(major_angles)} major angles (fast check)...")
     
-    # Step 2: try rotations
-    if include_all_rotations:
-        rotation_angles = range(ROTATION_STEP, 360, ROTATION_STEP)
-    else:
-        rotation_angles = [90, 180, 270]
-
-    for angle in rotation_angles:
-        rotated = rotate_image(image, angle)
-        results = model(rotated, conf=CONF_THRESH, verbose=False)
+    for angle in major_angles:
+        if angle == 0:
+            current_image = image
+        else:
+            current_image = rotate_image(image, angle)
+        
+        results = model(current_image, conf=CONF_THRESH, verbose=False)
         for result in results:
             for box in result.boxes:
                 conf = float(box.conf[0])
-                text = extract_text_from_box(rotated, box.xyxy[0])
-                if re.search(AADHAAR_REGEX, text.replace(" ", "")) and conf > best_conf:
-                    best_conf, best_angle, best_box, best_text, best_image = conf, angle, box.xyxy[0], text, rotated.copy()
-        if best_conf > 0.85:  # confident early exit
-            break
+                text = extract_text_from_box(current_image, box.xyxy[0])
+                if re.search(AADHAAR_REGEX, text.replace(" ", "")):
+                    inference_time = (time.time() - start_time) * 1000
+                    print(f"✅ Stage 1 Success: Found Aadhaar at {angle}° with confidence {conf:.2f}")
+                    return conf, angle, box.xyxy[0], text, current_image, original_image, inference_time
+    
+    print(f"⚠️ Stage 1 Failed: No Aadhaar detected in major angles")
+    
+    # Stage 2: Only if Stage 1 fails and include_all_rotations is True
+    # Check remaining angles (exclude the 4 major angles already checked)
+    if include_all_rotations:
+        # Generate all angles from 15 to 345 in steps of 15, excluding major angles
+        all_angles = range(ROTATION_STEP, 360, ROTATION_STEP)
+        remaining_angles = [angle for angle in all_angles if angle not in major_angles]
+        
+        print(f"🔍 Stage 2: Checking {len(remaining_angles)} remaining angles (thorough check)...")
+        
+        for angle in remaining_angles:
+            rotated = rotate_image(image, angle)
+            results = model(rotated, conf=CONF_THRESH, verbose=False)
+            for result in results:
+                for box in result.boxes:
+                    conf = float(box.conf[0])
+                    text = extract_text_from_box(rotated, box.xyxy[0])
+                    if re.search(AADHAAR_REGEX, text.replace(" ", "")) and conf > best_conf:
+                        best_conf, best_angle, best_box, best_text, best_image = conf, angle, box.xyxy[0], text, rotated.copy()
+            if best_conf > 0.85:  # confident early exit
+                print(f"✅ Stage 2 Success: Found Aadhaar at {angle}° with confidence {best_conf:.2f}")
+                break
     
     inference_time = (time.time() - start_time) * 1000
     if best_conf > 0:
+        print(f"✅ Stage 2 Complete: Best result at {best_angle}° with confidence {best_conf:.2f}")
         return best_conf, best_angle, best_box, best_text, best_image, original_image, inference_time
     else:
+        print(f"❌ Both stages failed: No Aadhaar detected at any angle")
         return None, None, None, None, image, original_image, inference_time
 
 def try_multiple_orientations(image):
@@ -310,7 +332,7 @@ def process_image_with_rotation(image_path, original_image):
     return extracted_info, image_with_boxes, detected_angle
 
 # ---------------- MAIN PROCESSOR ----------------
-def process_single_image(image_path=None, image_array=None, include_all_rotations=False):
+def process_single_image(image_path=None, image_array=None, include_all_rotations=True):
     """
     Main processing function with YOLO detection and fallback to orientation detection
     Can work with either file path or numpy array (in-memory processing)
