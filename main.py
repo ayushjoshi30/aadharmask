@@ -210,6 +210,39 @@ async def root():
         }
     }
 
+@app.get("/health")
+async def health_check():
+    """Health check endpoint with worker statistics"""
+    import psutil
+    
+    # Get worker info from environment if running under Gunicorn
+    worker_id = os.getenv("WORKER_ID", "N/A")
+    
+    # System stats
+    cpu_percent = psutil.cpu_percent(interval=0.1)
+    memory = psutil.virtual_memory()
+    
+    return {
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "server_info": {
+            "worker_configuration": "5 workers (Gunicorn + Uvicorn)",
+            "max_concurrent_requests": 5,
+            "current_worker_id": worker_id
+        },
+        "system_stats": {
+            "cpu_usage_percent": cpu_percent,
+            "memory_total_gb": round(memory.total / (1024**3), 2),
+            "memory_used_gb": round(memory.used / (1024**3), 2),
+            "memory_percent": memory.percent
+        },
+        "request_logs": {
+            "total_requests_logged": len(request_logs),
+            "max_log_capacity": MAX_LOGS
+        }
+    }
+
+
 @app.post("/api/auth/token")
 async def login_and_get_token(credentials: LoginRequest):
     """Authenticate with username/password and get authentication token"""
