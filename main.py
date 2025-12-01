@@ -391,6 +391,9 @@ async def upload_aadhaar(
             }
             status_code = 422
         
+        # Extract masked Aadhaar number if available
+        masked_aadhaar = extracted_info.get("AADHAR_NUMBER", "N/A")
+        
         # Log the request - only store images for failed masking
         log_entry = {
             "timestamp": get_ist_timestamp(),
@@ -398,7 +401,8 @@ async def upload_aadhaar(
             "status_code": status_code,
             "response_body": response_data,
             "confidence": confidence,
-            "performance": metrics
+            "performance": metrics,
+            "masked_aadhaar": masked_aadhaar
         }
         
         # Only store input image if masking failed (status 422)
@@ -633,8 +637,8 @@ async def download_logs_excel(request: Request, username: str = Depends(verify_a
     ws.title = "Request Logs"
     
     # Define headers
-    headers = ["Timestamp", "Request ID", "Status Code", "Masking Done", "Already Masked", "Confidence", 
-               "Preprocessing (ms)", "Model Inference (ms)", "Postprocessing (ms)"]
+    headers = ["Timestamp", "Request ID", "Status Code", "Masking Done", "Already Masked", "Masked Aadhaar", 
+               "Confidence", "Preprocessing (ms)", "Model Inference (ms)", "Postprocessing (ms)"]
     
     # Add input image column only if there are failed requests
     has_failed_requests = any(log['status_code'] == 422 for log in request_logs)
@@ -659,6 +663,7 @@ async def download_logs_excel(request: Request, username: str = Depends(verify_a
         already_masked = log['response_body']['details']['already_masked_count']
         confidence = log.get('confidence', 0.0)
         request_id = log.get('request_id', 'N/A')
+        masked_aadhaar = log.get('masked_aadhaar', 'N/A')
         
         # Extract performance metrics
         perf = log.get('performance', {})
@@ -672,6 +677,7 @@ async def download_logs_excel(request: Request, username: str = Depends(verify_a
             log['status_code'],
             masking_done,
             already_masked,
+            masked_aadhaar,
             round(confidence, 4),
             round(preprocessing_ms, 2),
             round(inference_ms, 2),
@@ -686,17 +692,18 @@ async def download_logs_excel(request: Request, username: str = Depends(verify_a
         ws.append(row)
     
     # Adjust column widths
-    ws.column_dimensions['A'].width = 25
-    ws.column_dimensions['B'].width = 20
-    ws.column_dimensions['C'].width = 12
-    ws.column_dimensions['D'].width = 15
-    ws.column_dimensions['E'].width = 15
-    ws.column_dimensions['F'].width = 12
-    ws.column_dimensions['G'].width = 18
-    ws.column_dimensions['H'].width = 20
-    ws.column_dimensions['I'].width = 20
+    ws.column_dimensions['A'].width = 25  # Timestamp
+    ws.column_dimensions['B'].width = 20  # Request ID
+    ws.column_dimensions['C'].width = 12  # Status Code
+    ws.column_dimensions['D'].width = 15  # Masking Done
+    ws.column_dimensions['E'].width = 15  # Already Masked
+    ws.column_dimensions['F'].width = 18  # Masked Aadhaar
+    ws.column_dimensions['G'].width = 12  # Confidence
+    ws.column_dimensions['H'].width = 18  # Preprocessing (ms)
+    ws.column_dimensions['I'].width = 20  # Model Inference (ms)
+    ws.column_dimensions['J'].width = 20  # Postprocessing (ms)
     if has_failed_requests:
-        ws.column_dimensions['J'].width = 30
+        ws.column_dimensions['K'].width = 30  # Input Image (Base64)
     
     # Save to BytesIO
     excel_file = BytesIO()
@@ -1032,6 +1039,7 @@ async def admin_logs(request: Request, username: str = Depends(verify_admin_sess
                         <th>Request ID</th>
                         <th>Status Code</th>
                         <th>Masking Status</th>
+                        <th>Masked Aadhaar</th>
                         <th>Confidence</th>
                         <th>Preprocessing (ms)</th>
                         <th>Inference (ms)</th>
@@ -1100,6 +1108,7 @@ async def admin_logs(request: Request, username: str = Depends(verify_admin_sess
                     const maskingDone = log.response_body.details.masking_done_count;
                     const confidence = log.confidence || 0.0;
                     const requestId = log.request_id || 'N/A';
+                    const maskedAadhaar = log.masked_aadhaar || 'N/A';
                     
                     const perf = log.performance || {};
                     const preprocessingMs = perf['3a_preprocessing_ms'] || 0.0;
@@ -1132,6 +1141,7 @@ async def admin_logs(request: Request, username: str = Depends(verify_admin_sess
                                     ${badgeText}
                                 </span>
                             </td>
+                            <td>${maskedAadhaar}</td>
                             <td>${confidence.toFixed(4)}</td>
                             <td>${preprocessingMs.toFixed(2)}</td>
                             <td>${inferenceMs.toFixed(2)}</td>
