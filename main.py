@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 from datetime import datetime, timedelta
+import pytz
 import base64
 import cv2
 import numpy as np
@@ -22,9 +23,21 @@ import os
 from io import BytesIO
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
+from filelock import FileLock
 
 # Import the Aadhaar processor
 from aadhaar_processor import process_single_image
+
+# Timezone configuration for IST
+IST = pytz.timezone('Asia/Kolkata')
+
+def get_ist_now():
+    """Get current datetime in IST"""
+    return datetime.now(IST)
+
+def get_ist_timestamp():
+    """Get current timestamp in IST as ISO format string"""
+    return get_ist_now().isoformat()
 
 # ==================== AUTH CONFIGURATION ====================
 import os
@@ -41,44 +54,79 @@ active_sessions = {}  # session_id -> username
 
 # ==================== IN-MEMORY LOG STORAGE ====================
 LOG_FILE = "request_logs.json"
+LOG_LOCK_FILE = "request_logs.json.lock"
 LOG_RETENTION_DAYS = 7
 request_logs = []
 MAX_LOGS = 1000  # Increased from 100 for longer retention
 
 def load_logs():
-    """Load logs from file on startup"""
+    """Load logs from file on startup with file locking"""
     global request_logs
-    if os.path.exists(LOG_FILE):
-        try:
-            with open(LOG_FILE, 'r', encoding='utf-8') as f:
-                request_logs = json.load(f)
-            print(f"✅ Loaded {len(request_logs)} existing logs from {LOG_FILE}")
-            # Clean old logs on startup
-            cleanup_old_logs()
-        except Exception as e:
-            print(f"⚠️ Could not load logs: {e}")
-            request_logs = []
-    else:
-        print("📝 No existing log file found, starting fresh")
+    lock = FileLock(LOG_LOCK_FILE, timeout=10)
+    try:
+        with lock:
+            if os.path.exists(LOG_FILE):
+                try:
+                    with open(LOG_FILE, 'r', encoding='utf-8') as f:
+                        request_logs = json.load(f)
+                    print(f"✅ Loaded {len(request_logs)} existing logs from {LOG_FILE}")
+                except Exception as e:
+                    print(f"⚠️ Could not load logs: {e}")
+                    request_logs = []
+            else:
+                print("📝 No existing log file found, starting fresh")
+                request_logs = []
+    except Exception as e:
+        print(f"⚠️ Could not acquire lock for loading logs: {e}")
         request_logs = []
 
 def save_logs():
-    """Save logs to file"""
+    """Save logs to file with file locking to prevent race conditions"""
+    lock = FileLock(LOG_LOCK_FILE, timeout=10)
     try:
-        with open(LOG_FILE, 'w', encoding='utf-8') as f:
-            json.dump(request_logs, f, indent=2)
+        with lock:
+            # Re-load logs from file to get latest state from other workers
+            existing_logs = []
+            if os.path.exists(LOG_FILE):
+                try:
+                    with open(LOG_FILE, 'r', encoding='utf-8') as f:
+                        existing_logs = json.load(f)
+                except:
+                    existing_logs = []
+            
+            # Merge current worker's logs with existing logs
+            # Use a set to track unique log entries by timestamp + request_id
+            seen = set()
+            merged_logs = []
+            
+            for log in existing_logs + request_logs:
+                key = (log.get('timestamp'), log.get('request_id'))
+                if key not in seen:
+                    seen.add(key)
+                    merged_logs.append(log)
+            
+            # Sort by timestamp
+            merged_logs.sort(key=lambda x: x['timestamp'])
+            
+            # Keep only last MAX_LOGS entries
+            if len(merged_logs) > MAX_LOGS:
+                merged_logs = merged_logs[-MAX_LOGS:]
+            
+            # Save merged logs
+            with open(LOG_FILE, 'w', encoding='utf-8') as f:
+                json.dump(merged_logs, f, indent=2)
     except Exception as e:
         print(f"⚠️ Could not save logs: {e}")
 
 def cleanup_old_logs():
     """Remove logs older than LOG_RETENTION_DAYS"""
     global request_logs
-    cutoff_date = datetime.now() - timedelta(days=LOG_RETENTION_DAYS)
+    cutoff_date = get_ist_now() - timedelta(days=LOG_RETENTION_DAYS)
     
     original_count = len(request_logs)
     request_logs = [
         log for log in request_logs
-        if datetime.fromisoformat(log['timestamp']) > cutoff_date
+        if datetime.fromisoformat(log['timestamp']).astimezone(IST) > cutoff_date
     ]
     
     removed_count = original_count - len(request_logs)
@@ -224,7 +272,7 @@ async def health_check():
     
     return {
         "status": "healthy",
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": get_ist_timestamp(),
         "server_info": {
             "worker_configuration": "5 workers (Gunicorn + Uvicorn)",
             "max_concurrent_requests": 5,
@@ -345,7 +393,7 @@ async def upload_aadhaar(
         
         # Log the request - only store images for failed masking
         log_entry = {
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": get_ist_timestamp(),
             "request_id": request_id if request_id else "N/A",
             "status_code": status_code,
             "response_body": response_data,
@@ -604,8 +652,9 @@ async def download_logs_excel(request: Request, username: str = Depends(verify_a
         cell.font = header_font
         cell.alignment = Alignment(horizontal="center", vertical="center")
     
-    # Add data
-    for log in request_logs:
+    
+    # Add data (reverse order - newest first)
+    for log in reversed(request_logs):
         masking_done = log['response_body']['details']['masking_done_count']
         already_masked = log['response_body']['details']['already_masked_count']
         confidence = log.get('confidence', 0.0)
@@ -655,7 +704,7 @@ async def download_logs_excel(request: Request, username: str = Depends(verify_a
     excel_file.seek(0)
     
     # Return as download
-    filename = f"request_logs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    filename = f"request_logs_{get_ist_now().strftime('%Y%m%d_%H%M%S')}.xlsx"
     
     return StreamingResponse(
         excel_file,
@@ -666,6 +715,10 @@ async def download_logs_excel(request: Request, username: str = Depends(verify_a
 @app.get("/admin/logs", response_class=HTMLResponse)
 async def admin_logs(request: Request, username: str = Depends(verify_admin_session)):
     """Admin panel to view request logs (requires session authentication)"""
+    
+    # Convert logs to JSON for JavaScript
+    import json
+    logs_json = json.dumps(list(reversed(request_logs)))
     
     html_content = """
     <!DOCTYPE html>
@@ -720,6 +773,8 @@ async def admin_logs(request: Request, username: str = Depends(verify_admin_sess
                 border-radius: 4px;
                 transition: all 0.2s;
                 display: inline-block;
+                border: none;
+                cursor: pointer;
             }
             .btn-primary {
                 background: #2196F3;
@@ -760,6 +815,33 @@ async def admin_logs(request: Request, username: str = Depends(verify_admin_sess
                 color: #666;
                 text-transform: uppercase;
                 letter-spacing: 0.5px;
+            }
+            .filters {
+                margin-bottom: 20px;
+                display: flex;
+                gap: 15px;
+                align-items: center;
+                padding: 15px;
+                background: #f9f9f9;
+                border-radius: 4px;
+            }
+            .filter-group {
+                display: flex;
+                gap: 10px;
+                align-items: center;
+            }
+            .filter-group label {
+                font-size: 14px;
+                font-weight: 500;
+                color: #333;
+            }
+            .filter-group select {
+                padding: 8px 12px;
+                border: 1px solid #ddd;
+                border-radius: 4px;
+                font-size: 14px;
+                background: white;
+                cursor: pointer;
             }
             table {
                 width: 100%;
@@ -853,6 +935,40 @@ async def admin_logs(request: Request, username: str = Depends(verify_admin_sess
                 padding: 60px 20px;
                 color: #999;
             }
+            .pagination {
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                gap: 10px;
+                margin-top: 20px;
+                padding: 20px;
+            }
+            .pagination button {
+                padding: 8px 12px;
+                border: 1px solid #ddd;
+                background: white;
+                border-radius: 4px;
+                cursor: pointer;
+                font-size: 14px;
+                transition: all 0.2s;
+            }
+            .pagination button:hover:not(:disabled) {
+                background: #f0f0f0;
+            }
+            .pagination button:disabled {
+                opacity: 0.5;
+                cursor: not-allowed;
+            }
+            .pagination button.active {
+                background: #2196F3;
+                color: white;
+                border-color: #2196F3;
+            }
+            .pagination-info {
+                font-size: 14px;
+                color: #666;
+                margin: 0 15px;
+            }
         </style>
     </head>
     <body>
@@ -871,16 +987,31 @@ async def admin_logs(request: Request, username: str = Depends(verify_admin_sess
             <div class="content">
             <div class="stats">
                 <div class="stat-card">
-                    <div class="stat-value">""" + str(len(request_logs)) + """</div>
+                    <div class="stat-value" id="totalCount">""" + str(len(request_logs)) + """</div>
                     <div class="stat-label">Total Requests</div>
                 </div>
                 <div class="stat-card">
-                    <div class="stat-value">""" + str(sum(1 for log in request_logs if log['status_code'] == 200)) + """</div>
+                    <div class="stat-value" id="successCount">""" + str(sum(1 for log in request_logs if log['status_code'] == 200)) + """</div>
                     <div class="stat-label">Success</div>
                 </div>
                 <div class="stat-card">
-                    <div class="stat-value">""" + str(sum(1 for log in request_logs if log['status_code'] == 422)) + """</div>
+                    <div class="stat-value" id="failedCount">""" + str(sum(1 for log in request_logs if log['status_code'] == 422)) + """</div>
                     <div class="stat-label">No Detection</div>
+                </div>
+            </div>
+            
+            <div class="filters">
+                <div class="filter-group">
+                    <label for="statusFilter">Filter by Status:</label>
+                    <select id="statusFilter" onchange="filterLogs()">
+                        <option value="all">All Statuses</option>
+                        <option value="200">200 - Success</option>
+                        <option value="422">422 - No Detection</option>
+                        <option value="500">500 - Error</option>
+                    </select>
+                </div>
+                <div class="filter-group">
+                    <span id="filterInfo"></span>
                 </div>
             </div>
     """
@@ -908,54 +1039,14 @@ async def admin_logs(request: Request, username: str = Depends(verify_admin_sess
                         <th>Input Image</th>
                     </tr>
                 </thead>
-                <tbody>
-        """
-        
-        for log in reversed(request_logs):
-            status_class = f"status-{log['status_code']}"
-            masking_done = log['response_body']['details']['masking_done_count']
-            confidence = log.get('confidence', 0.0)
-            request_id = log.get('request_id', 'N/A')
-            
-            # Extract performance metrics
-            perf = log.get('performance', {})
-            preprocessing_ms = perf.get('3a_preprocessing_ms', 0.0)
-            inference_ms = perf.get('3_model_inference_total_ms', 0.0)
-            postprocessing_ms = perf.get('4a_postproc_validation_ms', 0.0)
-            
-            # Only show input image if masking failed
-            input_image_cell = ""
-            if log.get('input_base64'):
-                input_image_cell = f"""
-                    <img src="data:image/jpeg;base64,{log['input_base64'][:100]}..." 
-                         class="image-preview" 
-                         onclick="showImage('data:image/jpeg;base64,{log['input_base64']}')"
-                         alt="Input">
-                """
-            else:
-                input_image_cell = "<span style='color: #999;'>N/A</span>"
-            
-            html_content += f"""
-                <tr>
-                    <td>{log['timestamp']}</td>
-                    <td>{request_id}</td>
-                    <td class="{status_class}">{log['status_code']}</td>
-                    <td>
-                        <span class="badge {'badge-success' if masking_done == 1 else 'badge-warning'}">
-                            {'Success' if masking_done == 1 else 'Failed'}
-                        </span>
-                    </td>
-                    <td>{round(confidence, 4)}</td>
-                    <td>{round(preprocessing_ms, 2)}</td>
-                    <td>{round(inference_ms, 2)}</td>
-                    <td>{round(postprocessing_ms, 2)}</td>
-                    <td>{input_image_cell}</td>
-                </tr>
-            """
-        
-        html_content += """
+                <tbody id="logsTableBody">
+                    <!-- Populated by JavaScript -->
                 </tbody>
             </table>
+            
+            <div class="pagination" id="paginationControls">
+                <!-- Populated by JavaScript -->
+            </div>
             </div>
         """
     
@@ -967,10 +1058,160 @@ async def admin_logs(request: Request, username: str = Depends(verify_admin_sess
         </div>
         
         <script>
+            const allLogs = """ + logs_json + """;
+            let filteredLogs = allLogs;
+            let currentPage = 1;
+            const logsPerPage = 20;
+            
+            function filterLogs() {
+                const statusFilter = document.getElementById('statusFilter').value;
+                
+                if (statusFilter === 'all') {
+                    filteredLogs = allLogs;
+                } else {
+                    filteredLogs = allLogs.filter(log => log.status_code == statusFilter);
+                }
+                
+                // Update filter info
+                const filterInfo = document.getElementById('filterInfo');
+                if (statusFilter === 'all') {
+                    filterInfo.textContent = '';
+                } else {
+                    filterInfo.textContent = `Showing ${filteredLogs.length} of ${allLogs.length} logs`;
+                }
+                
+                currentPage = 1; // Reset to first page
+                renderLogs();
+            }
+            
+            function renderLogs() {
+                const tbody = document.getElementById('logsTableBody');
+                tbody.innerHTML = '';
+                
+                // Calculate pagination
+                const totalPages = Math.ceil(filteredLogs.length / logsPerPage);
+                const startIndex = (currentPage - 1) * logsPerPage;
+                const endIndex = Math.min(startIndex + logsPerPage, filteredLogs.length);
+                const logsToShow = filteredLogs.slice(startIndex, endIndex);
+                
+                // Render logs
+                logsToShow.forEach(log => {
+                    const statusClass = `status-${log.status_code}`;
+                    const maskingDone = log.response_body.details.masking_done_count;
+                    const confidence = log.confidence || 0.0;
+                    const requestId = log.request_id || 'N/A';
+                    
+                    const perf = log.performance || {};
+                    const preprocessingMs = perf['3a_preprocessing_ms'] || 0.0;
+                    const inferenceMs = perf['3_model_inference_total_ms'] || 0.0;
+                    const postprocessingMs = perf['4a_postproc_validation_ms'] || 0.0;
+                    
+                    let inputImageCell = '';
+                    if (log.input_base64) {
+                        const preview = log.input_base64.substring(0, 100);
+                        inputImageCell = `
+                            <img src="data:image/jpeg;base64,${preview}..." 
+                                 class="image-preview" 
+                                 onclick="showImage('data:image/jpeg;base64,${log.input_base64}')"
+                                 alt="Input">
+                        `;
+                    } else {
+                        inputImageCell = '<span style="color: #999;">N/A</span>';
+                    }
+                    
+                    const badgeClass = maskingDone === 1 ? 'badge-success' : 'badge-warning';
+                    const badgeText = maskingDone === 1 ? 'Success' : 'Failed';
+                    
+                    const row = `
+                        <tr>
+                            <td>${log.timestamp}</td>
+                            <td>${requestId}</td>
+                            <td class="${statusClass}">${log.status_code}</td>
+                            <td>
+                                <span class="badge ${badgeClass}">
+                                    ${badgeText}
+                                </span>
+                            </td>
+                            <td>${confidence.toFixed(4)}</td>
+                            <td>${preprocessingMs.toFixed(2)}</td>
+                            <td>${inferenceMs.toFixed(2)}</td>
+                            <td>${postprocessingMs.toFixed(2)}</td>
+                            <td>${inputImageCell}</td>
+                        </tr>
+                    `;
+                    
+                    tbody.innerHTML += row;
+                });
+                
+                renderPagination(totalPages);
+            }
+            
+            function renderPagination(totalPages) {
+                const paginationDiv = document.getElementById('paginationControls');
+                if (totalPages <= 1) {
+                    paginationDiv.innerHTML = '';
+                    return;
+                }
+                
+                let html = '';
+                
+                // Previous button
+                html += `<button onclick="changePage(${currentPage - 1})" ${currentPage === 1 ? 'disabled' : ''}>← Previous</button>`;
+                
+                // Page numbers
+                const maxVisiblePages = 5;
+                let startPage = Math.max(1, currentPage - Math.floor(maxVisiblePages / 2));
+                let endPage = Math.min(totalPages, startPage + maxVisiblePages - 1);
+                
+                if (endPage - startPage < maxVisiblePages - 1) {
+                    startPage = Math.max(1, endPage - maxVisiblePages + 1);
+                }
+                
+                if (startPage > 1) {
+                    html += `<button onclick="changePage(1)">1</button>`;
+                    if (startPage > 2) {
+                        html += `<span class="pagination-info">...</span>`;
+                    }
+                }
+                
+                for (let i = startPage; i <= endPage; i++) {
+                    html += `<button onclick="changePage(${i})" class="${i === currentPage ? 'active' : ''}">${i}</button>`;
+                }
+                
+                if (endPage < totalPages) {
+                    if (endPage < totalPages - 1) {
+                        html += `<span class="pagination-info">...</span>`;
+                    }
+                    html += `<button onclick="changePage(${totalPages})">${totalPages}</button>`;
+                }
+                
+                // Next button
+                html += `<button onclick="changePage(${currentPage + 1})" ${currentPage === totalPages ? 'disabled' : ''}>Next →</button>`;
+                
+                // Show current page info
+                const startIndex = (currentPage - 1) * logsPerPage + 1;
+                const endIndex = Math.min(currentPage * logsPerPage, filteredLogs.length);
+                html += `<span class="pagination-info">Showing ${startIndex}-${endIndex} of ${filteredLogs.length}</span>`;
+                
+                paginationDiv.innerHTML = html;
+            }
+            
+            function changePage(page) {
+                const totalPages = Math.ceil(filteredLogs.length / logsPerPage);
+                if (page < 1 || page > totalPages) return;
+                
+                currentPage = page;
+                renderLogs();
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+            }
+            
             function showImage(src) {
                 document.getElementById('modalImage').src = src;
                 document.getElementById('imageModal').style.display = 'block';
             }
+            
+            // Initial render
+            renderLogs();
         </script>
     </body>
     </html>
@@ -982,7 +1223,7 @@ async def admin_logs(request: Request, username: str = Depends(verify_admin_sess
 async def health_check():
     return {
         "status": "healthy",
-        "timestamp": datetime.now().isoformat()
+        "timestamp": get_ist_timestamp()
     }
 
 if __name__ == "__main__":
